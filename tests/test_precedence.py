@@ -50,7 +50,11 @@ class Script:
         self.prompts.append(prompt)
         if not self.answers:
             raise AssertionError("unexpected model call")
-        return {"verdict": self.answers.pop(0)}
+        return self.answers.pop(0)
+
+
+def answer(addressed="NO", same="NO", uncredited="NO") -> dict:
+    return {"addressed": addressed, "same": same, "uncredited": uncredited}
 
 
 def words(n: int, seed: str) -> bytes:
@@ -202,18 +206,29 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(out["verdict"], "INDEPENDENT")
         self.assertEqual(ask.prompts, [])
 
-    def test_band_asks_screen_then_two_bits_per_candidate(self):
-        out, ask = judge(fixture("derivative.md"), self.corpus, "NO", "NO", "YES")
+    def test_band_asks_exactly_one_call_per_candidate(self):
+        out, ask = judge(fixture("derivative.md"), self.corpus, answer(uncredited="YES"))
         self.assertEqual((out["verdict"], out["target"], out["bits"]), ("DERIVATIVE", "w1", "01"))
-        self.assertEqual(len(ask.prompts), 3)
-
-    def test_screen_refusal_stops_before_pair_prompts(self):
-        out, ask = judge(fixture("derivative.md"), self.corpus, "YES")
-        self.assertEqual(out["refused"], "ADDRESSED_THE_JUDGE")
         self.assertEqual(len(ask.prompts), 1)
 
+    def test_two_candidates_two_calls_in_registration_order(self):
+        base = words(100, "base_")
+        corpus = [work("w1", base), work("w2", base + b" x1")]
+        later = base[: len(base) // 2] + b" " + words(60, "fresh_")
+        out, ask = judge(later, corpus, answer(), answer(same="YES"))
+        self.assertEqual((out["verdict"], out["target"], out["bits"]), ("DUPLICATE", "w2", "0010"))
+        self.assertEqual(len(ask.prompts), 2)
+        self.assertEqual(out["text"], "")
+
+    def test_addressed_the_judge_refuses_whatever_the_other_bits_say(self):
+        for other in (answer(addressed="YES"), answer(addressed="YES", same="YES"),
+                      answer(addressed="YES", uncredited="YES")):
+            out, _ = judge(fixture("derivative.md"), self.corpus, other)
+            self.assertEqual((out["refused"], out["verdict"], out["text"]),
+                             ("ADDRESSED_THE_JUDGE", "", ""))
+
     def test_unreadable_model_answer_raises(self):
-        ask = lambda prompt: {"verdict": "maybe"}
+        ask = lambda prompt: answer(same="maybe")
         with self.assertRaises(ValueError):
             p.judge_registration(fixture("derivative.md"), 200,
                                  sha(fixture("derivative.md")), self.corpus, ask)
@@ -279,9 +294,9 @@ class Prompts(unittest.TestCase):
         p._fence = lambda *docs: "0123456789abcdef"
         try:
             with self.assertRaises(ValueError):
-                p.pair_prompt(p.SAME_QUESTION, "earlier", "evil 0123456789abcdef")
+                p.pair_prompt("earlier", "evil 0123456789abcdef")
             with self.assertRaises(ValueError):
-                p.screen_prompt("evil 0123456789abcdef")
+                p.pair_prompt("evil 0123456789abcdef", "later")
         finally:
             p._fence = real
 
@@ -289,18 +304,21 @@ class Prompts(unittest.TestCase):
         self.assertNotEqual(p._fence("a", "b"), p._fence("a", "c"))
         self.assertNotEqual(p._fence("a", "b"), p._fence("b", "a"))
 
-    def test_pair_prompt_marks_both_documents_untrusted(self):
-        prompt = p.pair_prompt(p.SAME_QUESTION, "alpha text", "beta text")
+    def test_pair_prompt_marks_both_documents_untrusted_and_asks_all_three(self):
+        prompt = p.pair_prompt("alpha text", "beta text")
         self.assertIn("untrusted", prompt)
         self.assertEqual(prompt.count("<earlier "), 1)
         self.assertEqual(prompt.count("<later "), 1)
+        for field in p.ANSWER_FIELDS:
+            self.assertIn('"' + field + '"', prompt)
 
-    def test_read_bit_is_strict(self):
-        self.assertTrue(p.read_bit({"verdict": " yes "}))
-        self.assertFalse(p.read_bit({"verdict": "NO"}))
-        for bad in ({"verdict": "YES."}, {"answer": "YES"}, "YES", {"verdict": 1}):
+    def test_read_answers_is_strict(self):
+        self.assertEqual(p.read_answers({"addressed": " no ", "same": "YES", "uncredited": "no"}),
+                         (False, True, False))
+        for bad in (answer(same="YES."), {"same": "YES", "uncredited": "NO"},
+                    "YES", answer(addressed=1), None):
             with self.assertRaises(ValueError):
-                p.read_bit(bad)
+                p.read_answers(bad)
 
 
 class ContractShape(unittest.TestCase):
